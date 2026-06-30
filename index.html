@@ -18,7 +18,7 @@
   </section>
   <section class="drop card">
     <input id="zipInput" type="file" accept=".zip,application/zip" />
-    <p class="small">Use Instagram export format JSON when requesting your data. HTML exports are detected, but statistics are limited.</p>
+    <p class="small">Supports both Instagram JSON and HTML exports. JSON is preferred, but followers/following and most account lists are parsed from HTML too.</p>
     <div class="row" style="justify-content:center;margin-top:10px">
       <button id="saveSnapshot" class="secondary" disabled>Save this export as snapshot</button>
       <button id="clearSnapshots" class="danger">Clear saved snapshots</button>
@@ -48,18 +48,18 @@
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script>
 const EXPECTED = [
-  {key:'followers', label:'Followers list', patterns:[/followers_and_following\/followers_\d+\.json$/i, /connections\/followers_and_following\/followers_\d+\.json$/i]},
-  {key:'following', label:'Following list', patterns:[/followers_and_following\/following\.json$/i, /connections\/followers_and_following\/following\.json$/i]},
-  {key:'requests', label:'Follow requests / pending requests', patterns:[/recent_follow_requests\.json$/i,/pending_follow_requests\.json$/i,/follow_requests_you_received\.json$/i]},
-  {key:'blocked', label:'Blocked accounts', patterns:[/blocked_profiles\.json$/i,/blocked_accounts\.json$/i]},
-  {key:'close_friends', label:'Close friends', patterns:[/close_friends\.json$/i]},
-  {key:'messages', label:'Messages', patterns:[/messages\/inbox\/.+message_\d+\.json$/i]},
-  {key:'likes', label:'Liked posts/comments', patterns:[/likes\/liked_posts\.json$/i,/likes\/liked_comments\.json$/i]},
-  {key:'comments', label:'Comments', patterns:[/comments\/.+\.json$/i]},
-  {key:'saved', label:'Saved posts', patterns:[/saved\/saved_posts\.json$/i]},
-  {key:'profile', label:'Profile information', patterns:[/personal_information\/personal_information\.json$/i,/profile_information\.json$/i]},
-  {key:'ads', label:'Ads / topics', patterns:[/ads_information\/.+\.json$/i,/ads_and_topics\/.+\.json$/i]},
-  {key:'searches', label:'Search history', patterns:[/searches\/.+\.json$/i,/recent_searches\.json$/i]}
+  {key:'followers', label:'Followers list', patterns:[/followers_and_following\/followers_\d+\.(json|html)$/i, /connections\/followers_and_following\/followers_\d+\.(json|html)$/i]},
+  {key:'following', label:'Following list', patterns:[/followers_and_following\/following\.(json|html)$/i, /connections\/followers_and_following\/following\.(json|html)$/i]},
+  {key:'requests', label:'Follow requests / pending requests', patterns:[/(recent|pending)_follow_requests\.(json|html)$/i,/follow_requests_you_received\.(json|html)$/i]},
+  {key:'blocked', label:'Blocked accounts', patterns:[/blocked_profiles\.(json|html)$/i,/blocked_accounts\.(json|html)$/i]},
+  {key:'close_friends', label:'Close friends', patterns:[/close_friends\.(json|html)$/i]},
+  {key:'messages', label:'Messages', patterns:[/messages\/inbox\/.+message_\d+\.(json|html)$/i]},
+  {key:'likes', label:'Liked posts/comments', patterns:[/likes\/liked_posts\.(json|html)$/i,/likes\/liked_comments\.(json|html)$/i]},
+  {key:'comments', label:'Comments', patterns:[/comments\/.+\.(json|html)$/i]},
+  {key:'saved', label:'Saved posts', patterns:[/saved\/saved_posts\.(json|html)$/i]},
+  {key:'profile', label:'Profile information', patterns:[/personal_information\/personal_information\.(json|html)$/i,/profile_information\.(json|html)$/i]},
+  {key:'ads', label:'Ads / topics', patterns:[/ads_information\/.+\.(json|html)$/i,/ads_and_topics\/.+\.(json|html)$/i]},
+  {key:'searches', label:'Search history', patterns:[/searches\/.+\.(json|html)$/i,/recent_searches\.(json|html)$/i]}
 ];
 let current = null;
 let active = 'notFollowingBack';
@@ -82,6 +82,35 @@ function extractUserEntries(obj){
   for(const e of out){ if(e.username && !seen.has(e.username.toLowerCase())) seen.set(e.username.toLowerCase(), e); }
   return [...seen.values()].sort((a,b)=>a.username.localeCompare(b.username));
 }
+function extractHtmlUserEntries(html){
+  const out=[];
+  let doc;
+  try{ doc=new DOMParser().parseFromString(html,'text/html'); }catch{return out;}
+  const validUser=u=>/^[A-Za-z0-9._]{1,30}$/.test(u) && !['instagram','explore','accounts','reels','p','stories','direct','about','privacy','terms'].includes(u.toLowerCase());
+  doc.querySelectorAll('a[href]').forEach(a=>{
+    const href=a.getAttribute('href')||'';
+    let username=(a.textContent||'').trim().replace(/^@/,'');
+    try{
+      const url=new URL(href, 'https://www.instagram.com');
+      const parts=url.pathname.split('/').filter(Boolean);
+      if((url.hostname.includes('instagram.com') || !url.hostname) && parts.length===1) username=username||parts[0];
+    }catch{}
+    username=username.split(/\s+/)[0].replace(/^@/,'').trim();
+    if(validUser(username)) out.push({username, href:href.startsWith('http')?href:'https://www.instagram.com/'+encodeURIComponent(username), timestamp:null});
+  });
+  // Some HTML exports store usernames as plain text near dates, not always as links.
+  // Use a conservative fallback only when no anchor-based users were found.
+  if(!out.length){
+    const text=(doc.body?.innerText||'').split(/\n+/).map(x=>x.trim()).filter(Boolean);
+    for(const line of text){
+      const candidate=line.replace(/^@/,'').trim();
+      if(validUser(candidate)) out.push({username:candidate, href:'https://www.instagram.com/'+encodeURIComponent(candidate), timestamp:null});
+    }
+  }
+  const seen=new Map();
+  for(const e of out){ if(e.username && !seen.has(e.username.toLowerCase())) seen.set(e.username.toLowerCase(), e); }
+  return [...seen.values()].sort((a,b)=>a.username.localeCompare(b.username));
+}
 function detectKind(path){for(const e of EXPECTED){ if(e.patterns.some(r=>r.test(path))) return e.key; } return 'other';}
 function setDiff(a,b){const bs=new Set(b.map(x=>x.username.toLowerCase())); return a.filter(x=>!bs.has(x.username.toLowerCase()));}
 async function processZip(file){
@@ -93,17 +122,25 @@ async function processZip(file){
   for(const [path,zf] of Object.entries(zip.files)){
     if(zf.dir) continue;
     const p=normPath(path);
-    if(p.endsWith('.html')) htmlCount++;
-    if(!p.endsWith('.json')) continue;
-    jsonCount++;
-    const kind=detectKind(p); if(coverage[kind]!==undefined) coverage[kind]=true;
+    const isJson=p.toLowerCase().endsWith('.json');
+    const isHtml=p.toLowerCase().endsWith('.html') || p.toLowerCase().endsWith('.htm');
+    if(!isJson && !isHtml) continue;
+    const kind=detectKind(p);
+    if(kind==='other') continue;
+    if(coverage[kind]!==undefined) coverage[kind]=true;
     try{
       const text=await zf.async('text');
-      const obj=JSON.parse(text);
-      parsed.push({path:p, kind});
-      const entries=extractUserEntries(obj);
+      let entries=[];
+      if(isJson){
+        jsonCount++;
+        entries=extractUserEntries(JSON.parse(text));
+      }else{
+        htmlCount++;
+        entries=extractHtmlUserEntries(text);
+      }
+      parsed.push({path:p, kind, format:isJson?'json':'html', entries:entries.length});
       if(buckets[kind]) buckets[kind].push(...entries);
-    }catch(e){ errors++; parsed.push({path:p, kind, error:String(e)}); }
+    }catch(e){ errors++; parsed.push({path:p, kind, format:isJson?'json':'html', error:String(e)}); }
   }
   for(const k of Object.keys(buckets)){
     const m=new Map(); buckets[k].forEach(e=>{if(e.username&&!m.has(e.username.toLowerCase()))m.set(e.username.toLowerCase(),e)}); buckets[k]=[...m.values()].sort((a,b)=>a.username.localeCompare(b.username));
@@ -128,12 +165,12 @@ function card(label,value,sub){return `<div class="card"><div class="small">${la
 function render(){
   $('dashboard').classList.remove('hidden');
   $('stats').innerHTML=[
-    card('Followers',current.followers.length),card('Following',current.following.length),card('Not following you back',current.notFollowingBack.length),card('Followers you do not follow back',current.fans.length),card('Recent unfollows vs saved snapshot',current.unfollowed.length, snapshots().length?'Compared with last saved export':'Save a snapshot first'),card('JSON files parsed',current.jsonCount, current.errors?`${current.errors} parse errors`:'' )
+    card('Followers',current.followers.length),card('Following',current.following.length),card('Not following you back',current.notFollowingBack.length),card('Followers you do not follow back',current.fans.length),card('Recent unfollows vs saved snapshot',current.unfollowed.length, snapshots().length?'Compared with last saved export':'Save a snapshot first'),card('Files parsed',current.jsonCount + current.htmlCount, `${current.jsonCount} JSON · ${current.htmlCount} HTML${current.errors?' · '+current.errors+' errors':''}` )
   ].join('');
-  $('coverage').innerHTML=EXPECTED.map(e=>`<span class="pill ${current.coverage[e.key]?'ok':'miss'}">${current.coverage[e.key]?'✓':'×'} ${e.label}</span>`).join('') + (current.htmlCount&&!current.jsonCount?'<p class="warn">This looks like an HTML export. Request JSON from Instagram for full analysis.</p>':'');
+  $('coverage').innerHTML=EXPECTED.map(e=>`<span class="pill ${current.coverage[e.key]?'ok':'miss'}">${current.coverage[e.key]?'✓':'×'} ${e.label}</span>`).join('') + (current.htmlCount&&!current.jsonCount?'<p class="warn">This looks like an HTML export. Followers/following are supported, but JSON exports may expose more complete metadata.</p>':'');
   const tabs=[['notFollowingBack','Not following back'],['fans','You do not follow back'],['unfollowed','Recent unfollows'],['newFollowers','New followers'],['followers','Followers'],['following','Following'],['blocked','Blocked'],['requests','Requests']];
   $('tabs').innerHTML=tabs.map(([k,l])=>`<button class="tab ${active===k?'active':''}" onclick="active='${k}';renderList()">${l}</button>`).join('');
-  $('files').innerHTML='<details open><summary>Parsed JSON files</summary>'+current.parsed.slice(0,400).map(f=>`<p class="small"><code>${f.path}</code> — ${f.kind}${f.error?' — error':''}</p>`).join('')+'</details>';
+  $('files').innerHTML='<details open><summary>Parsed files</summary>'+current.parsed.slice(0,400).map(f=>`<p class="small"><code>${f.path}</code> — ${f.kind} · ${f.format || 'json'}${typeof f.entries==='number'?' · '+f.entries+' entries':''}${f.error?' — error':''}</p>`).join('')+'</details>';
   renderList();
 }
 function renderList(){
