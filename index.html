@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#111827" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <title>Instagram Data Inspector</title>
+  <style>
+    :root{--bg:#0b1020;--card:#121a2e;--muted:#94a3b8;--text:#e5e7eb;--accent:#93c5fd;--bad:#fca5a5;--good:#86efac;--warn:#fde68a;--border:#24324f}*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:linear-gradient(180deg,#070b16,#111827);color:var(--text)}main{max-width:980px;margin:0 auto;padding:24px 16px 60px}.hero{padding:24px 0 12px}h1{font-size:30px;line-height:1.05;margin:0 0 10px}p{color:var(--muted);line-height:1.5}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.card{background:rgba(18,26,46,.92);border:1px solid var(--border);border-radius:18px;padding:16px;box-shadow:0 10px 30px rgba(0,0,0,.25)}.drop{border:2px dashed #3b82f6;border-radius:22px;padding:22px;text-align:center;background:rgba(59,130,246,.08)}input[type=file]{width:100%;padding:12px;background:#0f172a;border-radius:12px;border:1px solid var(--border);color:var(--text)}button{border:0;border-radius:12px;padding:11px 14px;background:#2563eb;color:white;font-weight:700}button.secondary{background:#334155}button.danger{background:#991b1b}.stat{font-size:28px;font-weight:800;margin-top:6px}.small{font-size:13px;color:var(--muted)}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.pill{display:inline-flex;gap:6px;align-items:center;border:1px solid var(--border);background:#0f172a;border-radius:999px;padding:6px 10px;margin:4px 4px 0 0;font-size:13px}.ok{color:var(--good)}.miss{color:var(--bad)}.warn{color:var(--warn)}.tabs{display:flex;gap:8px;overflow:auto;padding:8px 0}.tab{white-space:nowrap;background:#172036}.tab.active{background:#2563eb}.list{display:grid;gap:8px;margin-top:12px}.item{display:flex;justify-content:space-between;gap:10px;border:1px solid var(--border);background:#0f172a;border-radius:14px;padding:12px}.item a{color:var(--accent);text-decoration:none}.search{width:100%;padding:12px;border-radius:12px;border:1px solid var(--border);background:#020617;color:var(--text)}details{border:1px solid var(--border);border-radius:14px;padding:12px;background:#0f172a}summary{cursor:pointer;font-weight:700}code{word-break:break-all;color:#bfdbfe}.hidden{display:none}.footer{margin-top:28px;font-size:13px;color:var(--muted)}
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <h1>Instagram Data Inspector</h1>
+    <p>Open the zip exported from Instagram. Everything is processed locally in this browser; the zip is not uploaded anywhere.</p>
+  </section>
+  <section class="drop card">
+    <input id="zipInput" type="file" accept=".zip,application/zip" />
+    <p class="small">Use Instagram export format JSON when requesting your data. HTML exports are detected, but statistics are limited.</p>
+    <div class="row" style="justify-content:center;margin-top:10px">
+      <button id="saveSnapshot" class="secondary" disabled>Save this export as snapshot</button>
+      <button id="clearSnapshots" class="danger">Clear saved snapshots</button>
+    </div>
+    <p id="status" class="small"></p>
+  </section>
+
+  <section id="dashboard" class="hidden">
+    <h2>Overview</h2>
+    <div class="grid" id="stats"></div>
+
+    <h2>Downloaded coverage</h2>
+    <div class="card" id="coverage"></div>
+
+    <h2>Relationship analysis</h2>
+    <div class="tabs" id="tabs"></div>
+    <div class="card">
+      <input id="search" class="search" placeholder="Search usernames…" />
+      <div id="list" class="list"></div>
+    </div>
+
+    <h2>Files understood</h2>
+    <div class="card" id="files"></div>
+  </section>
+  <p class="footer">Recent unfollows require at least two processed exports. Save today’s snapshot, then process a later export and compare.</p>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script>
+const EXPECTED = [
+  {key:'followers', label:'Followers list', patterns:[/followers_and_following\/followers_\d+\.json$/i, /connections\/followers_and_following\/followers_\d+\.json$/i]},
+  {key:'following', label:'Following list', patterns:[/followers_and_following\/following\.json$/i, /connections\/followers_and_following\/following\.json$/i]},
+  {key:'requests', label:'Follow requests / pending requests', patterns:[/recent_follow_requests\.json$/i,/pending_follow_requests\.json$/i,/follow_requests_you_received\.json$/i]},
+  {key:'blocked', label:'Blocked accounts', patterns:[/blocked_profiles\.json$/i,/blocked_accounts\.json$/i]},
+  {key:'close_friends', label:'Close friends', patterns:[/close_friends\.json$/i]},
+  {key:'messages', label:'Messages', patterns:[/messages\/inbox\/.+message_\d+\.json$/i]},
+  {key:'likes', label:'Liked posts/comments', patterns:[/likes\/liked_posts\.json$/i,/likes\/liked_comments\.json$/i]},
+  {key:'comments', label:'Comments', patterns:[/comments\/.+\.json$/i]},
+  {key:'saved', label:'Saved posts', patterns:[/saved\/saved_posts\.json$/i]},
+  {key:'profile', label:'Profile information', patterns:[/personal_information\/personal_information\.json$/i,/profile_information\.json$/i]},
+  {key:'ads', label:'Ads / topics', patterns:[/ads_information\/.+\.json$/i,/ads_and_topics\/.+\.json$/i]},
+  {key:'searches', label:'Search history', patterns:[/searches\/.+\.json$/i,/recent_searches\.json$/i]}
+];
+let current = null;
+let active = 'notFollowingBack';
+const $ = id => document.getElementById(id);
+function normPath(p){return p.replace(/^instagram-[^/]+\//,'').replace(/^your_instagram_activity\//,'').replace(/^connections\//,'connections/');}
+function extractUserEntries(obj){
+  const out=[];
+  const visit=x=>{
+    if(!x) return;
+    if(Array.isArray(x)){ x.forEach(visit); return; }
+    if(typeof x==='object'){
+      if(Array.isArray(x.string_list_data)){
+        x.string_list_data.forEach(d=>{ if(d && (d.value || d.href)) out.push({username:(d.value||'').trim(), href:d.href||'', timestamp:d.timestamp||null}); });
+      }
+      for(const k of Object.keys(x)) if(k!=='string_list_data') visit(x[k]);
+    }
+  };
+  visit(obj);
+  const seen=new Map();
+  for(const e of out){ if(e.username && !seen.has(e.username.toLowerCase())) seen.set(e.username.toLowerCase(), e); }
+  return [...seen.values()].sort((a,b)=>a.username.localeCompare(b.username));
+}
+function detectKind(path){for(const e of EXPECTED){ if(e.patterns.some(r=>r.test(path))) return e.key; } return 'other';}
+function setDiff(a,b){const bs=new Set(b.map(x=>x.username.toLowerCase())); return a.filter(x=>!bs.has(x.username.toLowerCase()));}
+async function processZip(file){
+  $('status').textContent='Reading zip…';
+  const zip=await JSZip.loadAsync(file);
+  const parsed=[], coverage={}; EXPECTED.forEach(e=>coverage[e.key]=false);
+  const buckets={followers:[],following:[],blocked:[],close_friends:[],requests:[]};
+  let jsonCount=0, htmlCount=0, errors=0;
+  for(const [path,zf] of Object.entries(zip.files)){
+    if(zf.dir) continue;
+    const p=normPath(path);
+    if(p.endsWith('.html')) htmlCount++;
+    if(!p.endsWith('.json')) continue;
+    jsonCount++;
+    const kind=detectKind(p); if(coverage[kind]!==undefined) coverage[kind]=true;
+    try{
+      const text=await zf.async('text');
+      const obj=JSON.parse(text);
+      parsed.push({path:p, kind});
+      const entries=extractUserEntries(obj);
+      if(buckets[kind]) buckets[kind].push(...entries);
+    }catch(e){ errors++; parsed.push({path:p, kind, error:String(e)}); }
+  }
+  for(const k of Object.keys(buckets)){
+    const m=new Map(); buckets[k].forEach(e=>{if(e.username&&!m.has(e.username.toLowerCase()))m.set(e.username.toLowerCase(),e)}); buckets[k]=[...m.values()].sort((a,b)=>a.username.localeCompare(b.username));
+  }
+  const followers=buckets.followers, following=buckets.following;
+  const notFollowingBack=setDiff(following,followers);
+  const fans=setDiff(followers,following);
+  const previous=getLatestSnapshot();
+  let unfollowed=[], newFollowers=[];
+  if(previous){
+    unfollowed=setDiff(previous.followers||[], followers);
+    newFollowers=setDiff(followers, previous.followers||[]);
+  }
+  current={fileName:file.name, processedAt:new Date().toISOString(), jsonCount, htmlCount, errors, parsed, coverage, buckets, followers, following, notFollowingBack, fans, unfollowed, newFollowers};
+  render(); $('saveSnapshot').disabled=false; $('status').textContent='Processed locally. No data was uploaded.';
+}
+function snapshots(){try{return JSON.parse(localStorage.getItem('igdi_snapshots')||'[]')}catch{return[]}}
+function getLatestSnapshot(){const s=snapshots(); return s.length?s[s.length-1]:null}
+function saveSnapshot(){ if(!current) return; const s=snapshots(); s.push({processedAt:current.processedAt,fileName:current.fileName,followers:current.followers,following:current.following}); localStorage.setItem('igdi_snapshots',JSON.stringify(s.slice(-10))); alert('Snapshot saved on this phone/browser.'); }
+function clearSnapshots(){localStorage.removeItem('igdi_snapshots'); alert('Saved snapshots cleared.'); if(current) render();}
+function card(label,value,sub){return `<div class="card"><div class="small">${label}</div><div class="stat">${value}</div><div class="small">${sub||''}</div></div>`}
+function render(){
+  $('dashboard').classList.remove('hidden');
+  $('stats').innerHTML=[
+    card('Followers',current.followers.length),card('Following',current.following.length),card('Not following you back',current.notFollowingBack.length),card('Followers you do not follow back',current.fans.length),card('Recent unfollows vs saved snapshot',current.unfollowed.length, snapshots().length?'Compared with last saved export':'Save a snapshot first'),card('JSON files parsed',current.jsonCount, current.errors?`${current.errors} parse errors`:'' )
+  ].join('');
+  $('coverage').innerHTML=EXPECTED.map(e=>`<span class="pill ${current.coverage[e.key]?'ok':'miss'}">${current.coverage[e.key]?'✓':'×'} ${e.label}</span>`).join('') + (current.htmlCount&&!current.jsonCount?'<p class="warn">This looks like an HTML export. Request JSON from Instagram for full analysis.</p>':'');
+  const tabs=[['notFollowingBack','Not following back'],['fans','You do not follow back'],['unfollowed','Recent unfollows'],['newFollowers','New followers'],['followers','Followers'],['following','Following'],['blocked','Blocked'],['requests','Requests']];
+  $('tabs').innerHTML=tabs.map(([k,l])=>`<button class="tab ${active===k?'active':''}" onclick="active='${k}';renderList()">${l}</button>`).join('');
+  $('files').innerHTML='<details open><summary>Parsed JSON files</summary>'+current.parsed.slice(0,400).map(f=>`<p class="small"><code>${f.path}</code> — ${f.kind}${f.error?' — error':''}</p>`).join('')+'</details>';
+  renderList();
+}
+function renderList(){
+  const q=$('search').value.toLowerCase().trim();
+  const arr=(current[active] || current.buckets[active] || []).filter(e=>!q||e.username.toLowerCase().includes(q));
+  $('list').innerHTML=arr.length?arr.slice(0,1000).map(e=>`<div class="item"><a target="_blank" rel="noopener" href="${e.href||'https://instagram.com/'+encodeURIComponent(e.username)}">@${e.username}</a>${e.timestamp?`<span class="small">${new Date(e.timestamp*1000).toLocaleDateString()}</span>`:''}</div>`).join(''):'<p class="small">No entries.</p>';
+}
+$('zipInput').addEventListener('change',e=>{const f=e.target.files[0]; if(f) processZip(f).catch(err=>{$('status').textContent='Error: '+err.message; console.error(err);});});
+$('search').addEventListener('input',renderList); $('saveSnapshot').addEventListener('click',saveSnapshot); $('clearSnapshots').addEventListener('click',clearSnapshots);
+if('serviceWorker' in navigator){navigator.serviceWorker.register('service-worker.js').catch(()=>{});}
+</script>
+</body>
+</html>
