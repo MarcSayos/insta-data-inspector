@@ -50,6 +50,7 @@
 const EXPECTED = [
   {key:'followers', label:'Followers list', patterns:[/followers_and_following\/followers_\d+\.(json|html)$/i, /connections\/followers_and_following\/followers_\d+\.(json|html)$/i]},
   {key:'following', label:'Following list', patterns:[/followers_and_following\/following\.(json|html)$/i, /connections\/followers_and_following\/following\.(json|html)$/i]},
+  {key:'recently_unfollowed', label:'Accounts you recently unfollowed', patterns:[/recently_unfollowed_profiles\.(json|html)$/i]},
   {key:'requests', label:'Follow requests / pending requests', patterns:[/(recent|pending)_follow_requests\.(json|html)$/i,/follow_requests_you_received\.(json|html)$/i]},
   {key:'blocked', label:'Blocked accounts', patterns:[/blocked_profiles\.(json|html)$/i,/blocked_accounts\.(json|html)$/i]},
   {key:'close_friends', label:'Close friends', patterns:[/close_friends\.(json|html)$/i]},
@@ -66,21 +67,20 @@ let active = 'notFollowingBack';
 const $ = id => document.getElementById(id);
 function normPath(p){return p.replace(/^instagram-[^/]+\//,'').replace(/^your_instagram_activity\//,'').replace(/^connections\//,'connections/');}
 function extractUserEntries(obj){
-  const out=[];
-  const visit=x=>{
-    if(!x) return;
-    if(Array.isArray(x)){ x.forEach(visit); return; }
-    if(typeof x==='object'){
-      if(Array.isArray(x.string_list_data)){
-        x.string_list_data.forEach(d=>{ if(d && (d.value || d.href)) out.push({username:(d.value||'').trim(), href:d.href||'', timestamp:d.timestamp||null}); });
-      }
-      for(const k of Object.keys(x)) if(k!=='string_list_data') visit(x[k]);
-    }
-  };
-  visit(obj);
-  const seen=new Map();
-  for(const e of out){ if(e.username && !seen.has(e.username.toLowerCase())) seen.set(e.username.toLowerCase(), e); }
-  return [...seen.values()].sort((a,b)=>a.username.localeCompare(b.username));
+ const out=[];
+ const valid=u=>/^[A-Za-z0-9._]{1,30}$/.test(u||'');
+ const fromHref=href=>{try{const u=new URL(href);if(!/(^|\.)instagram\.com$/i.test(u.hostname))return '';const parts=u.pathname.split('/').filter(Boolean);if(parts[0]==='_u')parts.shift();return parts.length===1?parts[0]:'';}catch{return '';}};
+ const visit=x=>{
+  if(!x)return;
+  if(Array.isArray(x)){x.forEach(visit);return;}
+  if(typeof x==='object'){
+   if(Array.isArray(x.string_list_data))x.string_list_data.forEach(d=>{if(!d)return;const username=(d.value||x.title||fromHref(d.href)||'').trim().replace(/^@/,'');if(valid(username))out.push({username,href:'https://www.instagram.com/'+encodeURIComponent(username)+'/',timestamp:d.timestamp||null});});
+   if(Array.isArray(x.label_values)){const e=x.label_values.find(v=>/^(username|user name|nom d[’']usuari|nombre de usuario|nome utente)$/i.test((v.label||'').trim()));const username=(e?.value||'').trim().replace(/^@/,'');if(valid(username))out.push({username,href:'https://www.instagram.com/'+encodeURIComponent(username)+'/',timestamp:x.timestamp||null});}
+   for(const k of Object.keys(x))if(k!=='string_list_data'&&k!=='label_values')visit(x[k]);
+  }
+ };
+ visit(obj);const seen=new Map();for(const e of out)if(!seen.has(e.username.toLowerCase()))seen.set(e.username.toLowerCase(),e);
+ return [...seen.values()].sort((a,b)=>a.username.localeCompare(b.username));
 }
 function extractHtmlUserEntries(html){
   const out=[];
@@ -117,7 +117,7 @@ async function processZip(file){
   $('status').textContent='Reading zip…';
   const zip=await JSZip.loadAsync(file);
   const parsed=[], coverage={}; EXPECTED.forEach(e=>coverage[e.key]=false);
-  const buckets={followers:[],following:[],blocked:[],close_friends:[],requests:[]};
+  const buckets={followers:[],following:[],blocked:[],close_friends:[],requests:[],recently_unfollowed:[]};
   let jsonCount=0, htmlCount=0, errors=0;
   for(const [path,zf] of Object.entries(zip.files)){
     if(zf.dir) continue;
@@ -150,12 +150,12 @@ async function processZip(file){
   const fans=setDiff(followers,following);
   const previous=getLatestSnapshot();
   let unfollowed=[], newFollowers=[];
-  if(previous){
+  if(previous && followers.length && previous.followers?.length){
     unfollowed=setDiff(previous.followers||[], followers);
     newFollowers=setDiff(followers, previous.followers||[]);
   }
   current={fileName:file.name, processedAt:new Date().toISOString(), jsonCount, htmlCount, errors, parsed, coverage, buckets, followers, following, notFollowingBack, fans, unfollowed, newFollowers};
-  render(); $('saveSnapshot').disabled=false; $('status').textContent='Processed locally. No data was uploaded.';
+  render(); $('saveSnapshot').disabled=!(followers.length && following.length); $('status').textContent='Processed locally. No data was uploaded.';
 }
 function snapshots(){try{return JSON.parse(localStorage.getItem('igdi_snapshots')||'[]')}catch{return[]}}
 function getLatestSnapshot(){const s=snapshots(); return s.length?s[s.length-1]:null}
@@ -165,10 +165,10 @@ function card(label,value,sub){return `<div class="card"><div class="small">${la
 function render(){
   $('dashboard').classList.remove('hidden');
   $('stats').innerHTML=[
-    card('Followers',current.followers.length),card('Following',current.following.length),card('Not following you back',current.notFollowingBack.length),card('Followers you do not follow back',current.fans.length),card('Recent unfollows vs saved snapshot',current.unfollowed.length, snapshots().length?'Compared with last saved export':'Save a snapshot first'),card('Files parsed',current.jsonCount + current.htmlCount, `${current.jsonCount} JSON · ${current.htmlCount} HTML${current.errors?' · '+current.errors+' errors':''}` )
+    card('Followers',current.followers.length),card('Following',current.following.length),card('Not following you back',current.notFollowingBack.length),card('Followers you do not follow back',current.fans.length),card('Lost followers vs saved snapshot',current.unfollowed.length, snapshots().length?'Compared with last saved export':'Save a snapshot first'),card('You recently unfollowed',current.buckets.recently_unfollowed.length),card('Files parsed',current.jsonCount + current.htmlCount, `${current.jsonCount} JSON · ${current.htmlCount} HTML${current.errors?' · '+current.errors+' errors':''}` )
   ].join('');
   $('coverage').innerHTML=EXPECTED.map(e=>`<span class="pill ${current.coverage[e.key]?'ok':'miss'}">${current.coverage[e.key]?'✓':'×'} ${e.label}</span>`).join('') + (current.htmlCount&&!current.jsonCount?'<p class="warn">This looks like an HTML export. Followers/following are supported, but JSON exports may expose more complete metadata.</p>':'');
-  const tabs=[['notFollowingBack','Not following back'],['fans','You do not follow back'],['unfollowed','Recent unfollows'],['newFollowers','New followers'],['followers','Followers'],['following','Following'],['blocked','Blocked'],['requests','Requests']];
+  const tabs=[['notFollowingBack','Not following back'],['fans','You do not follow back'],['unfollowed','Lost followers (snapshot)'],['recently_unfollowed','You recently unfollowed'],['newFollowers','New followers'],['followers','Followers'],['following','Following'],['blocked','Blocked'],['requests','Requests']];
   $('tabs').innerHTML=tabs.map(([k,l])=>`<button class="tab ${active===k?'active':''}" onclick="active='${k}';renderList()">${l}</button>`).join('');
   $('files').innerHTML='<details open><summary>Parsed files</summary>'+current.parsed.slice(0,400).map(f=>`<p class="small"><code>${f.path}</code> — ${f.kind} · ${f.format || 'json'}${typeof f.entries==='number'?' · '+f.entries+' entries':''}${f.error?' — error':''}</p>`).join('')+'</details>';
   renderList();
